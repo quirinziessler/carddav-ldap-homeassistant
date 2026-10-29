@@ -172,30 +172,64 @@ def fetch_icloud_vcards(user, password):
 
     return vcard_strings
 
-def normalize_number(raw_num, default_country="DE"):
-    if not raw_num:
-        return None, None
-    clean = str(raw_num).strip()
+def get_number_variants(raw_num, default_country="DE"):
+    """
+    Erzeugt fuer eine Rufnummer alle gaengigen Formate (E.164, National, ohne Leerzeichen, 00...):
+    - Erstes Element ist das schoene internationale Format fuers Display (+49 162 1234567)
+    - Nachfolgende Elemente sind nationale und reine Ziffern-Varianten (01621234567, +491621234567...)
+      fuer die eingehende Rufnummern-Erkennung (CLIP / Rueckwaertssuche).
+    Liefert (canonical_e164, list_of_variants)
+    """
+    clean = str(raw_num or '').strip()
     if not clean:
-        return None, None
+        return None, []
+
+    canonical_e164 = None
+    variants = []
 
     try:
         parsed = phonenumbers.parse(clean, default_country)
         if phonenumbers.is_possible_number(parsed):
-            canonical = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
-            display = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
-            return canonical, display
+            canonical_e164 = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+            intl_display = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+            nat_display = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.NATIONAL)
+            nat_digits = re.sub(r'[^\d]', '', nat_display)
+            e164_digits = canonical_e164
+
+            # 1. Hauptanzeige (Display am Handset)
+            variants.append(intl_display)
+
+            # 2. National ohne Leerzeichen (z. B. '01621234567' wie von Telekom/Fritz!Box signalisiert)
+            if nat_digits and nat_digits not in variants:
+                variants.append(nat_digits)
+
+            # 3. E.164 ohne Leerzeichen (z. B. '+491621234567')
+            if e164_digits and e164_digits not in variants:
+                variants.append(e164_digits)
+
+            # 4. National mit Leerzeichen ('0162 1234567')
+            if nat_display and nat_display not in variants:
+                variants.append(nat_display)
+
+            # 5. International mit 00 ('00491621234567')
+            if canonical_e164.startswith('+'):
+                zerozero = '00' + canonical_e164[1:]
+                if zerozero not in variants:
+                    variants.append(zerozero)
     except Exception:
         pass
 
+    # Fallback bei internen Nebenstellen oder Sondernummern
     digits = re.sub(r'[^\d+]', '', clean)
-    if digits.startswith('00'):
-        digits = '+' + digits[2:]
-    elif digits.startswith('+490'):
-        digits = '+49' + digits[4:]
     if len(digits) >= 3:
-        return digits, clean
-    return None, None
+        if not canonical_e164:
+            canonical_e164 = digits
+        if clean not in variants:
+            variants.append(clean)
+        if digits not in variants:
+            variants.append(digits)
+
+    return canonical_e164, variants
 
 class MergedContact:
     def __init__(self, fn, family_name, given_name, account_id):
@@ -203,11 +237,11 @@ class MergedContact:
         self.family_name = family_name
         self.given_name = given_name
         self.account_ids = {account_id}
-        self.home_numbers = set()
-        self.work_numbers = set()
-        self.mobile_numbers = set()
-        self.fax_numbers = set()
-        self.other_numbers = set()
+        self.home_numbers = []
+        self.work_numbers = []
+        self.mobile_numbers = []
+        self.fax_numbers = []
+        self.other_numbers = []
         self.canonical_numbers = set()
         self.canonical_mobile_numbers = set()
 
@@ -246,11 +280,11 @@ def name_quality(fn, family, given):
     return score
 
 def extract_numbers_from_vcard(vcard, default_country="DE"):
-    home = set()
-    work = set()
-    mobile = set()
-    fax = set()
-    other = set()
+    home = []
+    work = []
+    mobile = []
+    fax = []
+    other = []
     canonical_all = set()
     canonical_mobile = set()
 
@@ -267,8 +301,8 @@ def extract_numbers_from_vcard(vcard, default_country="DE"):
 
     for tel in tel_children:
         raw_val = getattr(tel, 'value', '')
-        canonical, display = normalize_number(raw_val, default_country)
-        if not canonical:
+        canonical, variants = get_number_variants(raw_val, default_country)
+        if not canonical or not variants:
             continue
 
         canonical_all.add(canonical)
@@ -294,16 +328,16 @@ def extract_numbers_from_vcard(vcard, default_country="DE"):
                 types.append('FAX')
 
         if any(t in types for t in ('CELL', 'MOBILE', 'IPHONE')):
-            mobile.add(display)
+            mobile.extend(variants)
             canonical_mobile.add(canonical)
         elif any(t in types for t in ('WORK', 'BUSINESS')):
-            work.add(display)
+            work.extend(variants)
         elif any(t in types for t in ('HOME', 'PRIVATE')):
-            home.add(display)
+            home.extend(variants)
         elif any(t in types for t in ('FAX',)):
-            fax.add(display)
+            fax.extend(variants)
         else:
-            other.add(display)
+            other.extend(variants)
 
     return {
         'home': home,
@@ -380,11 +414,11 @@ def sync_contacts():
                 target_contact.account_ids.add(acc_idx)
                 target_contact.canonical_numbers.update(temp_canonical)
                 target_contact.canonical_mobile_numbers.update(extracted['canonical_mobile'])
-                target_contact.home_numbers.update(extracted['home'])
-                target_contact.work_numbers.update(extracted['work'])
-                target_contact.mobile_numbers.update(extracted['mobile'])
-                target_contact.fax_numbers.update(extracted['fax'])
-                target_contact.other_numbers.update(extracted['other'])
+                target_contact.home_numbers.extend(extracted['home'])
+                target_contact.work_numbers.extend(extracted['work'])
+                target_contact.mobile_numbers.extend(extracted['mobile'])
+                target_contact.fax_numbers.extend(extracted['fax'])
+                target_contact.other_numbers.extend(extracted['other'])
 
                 if name_quality(fn, family_name, given_name) > name_quality(target_contact.fn, target_contact.family_name, target_contact.given_name):
                     target_contact.fn = fn
@@ -417,7 +451,7 @@ def sync_contacts():
     server = Server('ldap://localhost:389', get_info=ALL)
     conn = Connection(server, bind_dn, bind_pw, auto_bind=True)
 
-    # 1. Basis Domain dc=home,dc=local anlegen (erforderlich als Elternknoten fuer alle Untereintraege)
+    # 1. Basis Domain dc=home,dc=local anlegen
     conn.add('dc=home,dc=local', ['top', 'dcObject', 'organization'], {'dc': 'home', 'o': 'Home'})
     if conn.result.get('description') not in ('success', 'entryAlreadyExists'):
         print(f"Initialisierung dc=home,dc=local: {conn.result}")
@@ -438,15 +472,16 @@ def sync_contacts():
         used_cns[cn] = count + 1
         unique_cn = cn if count == 0 else f"{cn} ({count + 1})"
 
-        work_list = sorted(list(c.work_numbers))
-        home_list = sorted(list(c.home_numbers))
-        mobile_list = sorted(list(c.mobile_numbers))
-        fax_list = sorted(list(c.fax_numbers))
-        other_list = sorted(list(c.other_numbers))
+        # Eindeutige Listen unter Beibehaltung der Reihenfolge (Hauptanzeige zuerst, dann CLIP-Ziffern)
+        work_list = list(dict.fromkeys(c.work_numbers))
+        home_list = list(dict.fromkeys(c.home_numbers))
+        mobile_list = list(dict.fromkeys(c.mobile_numbers))
+        fax_list = list(dict.fromkeys(c.fax_numbers))
+        other_list = list(dict.fromkeys(c.other_numbers))
 
-        primary_telephones = work_list + other_list
+        primary_telephones = list(dict.fromkeys(work_list + other_list))
         if not primary_telephones:
-            primary_telephones = mobile_list + home_list
+            primary_telephones = list(dict.fromkeys(mobile_list + home_list))
 
         escaped_cn = escape_rdn(unique_cn)
         dn = f'cn={escaped_cn},ou=contacts,dc=home,dc=local'
@@ -458,7 +493,6 @@ def sync_contacts():
             'sn': c.family_name if c.family_name else unique_cn,
             'telephoneNumber': primary_telephones
         }
-        # givenName darf in LDAP niemals ein leerer String sein (RFC 4517 Syntax)
         if c.given_name and c.given_name.strip():
             attrs['givenName'] = c.given_name.strip()
         if mobile_list:
