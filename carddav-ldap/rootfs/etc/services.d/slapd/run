@@ -2,6 +2,67 @@
 
 mkdir -p /run/openldap
 mkdir -p /var/lib/openldap/openldap-data
+chown -R ldap:ldap /var/lib/openldap/openldap-data /run/openldap
+
+LDAP_USER=$(bashio::config 'ldap_user' '')
+LDAP_PASS=$(bashio::config 'ldap_pass' '')
+
+SLAPD_CONF="/etc/openldap/slapd.conf"
+
+if bashio::var.has_value "${LDAP_USER}" && bashio::var.has_value "${LDAP_PASS}"; then
+    bashio::log.info "LDAP-Authentifizierung AKTIVIERT: Benutzer '${LDAP_USER}' mit Passwort konfiguriert."
+    BIND_DN="cn=${LDAP_USER},dc=home,dc=local"
+
+    cat <<EOF > "${SLAPD_CONF}"
+include /etc/openldap/schema/core.schema
+include /etc/openldap/schema/cosine.schema
+include /etc/openldap/schema/inetorgperson.schema
+
+pidfile /run/openldap/slapd.pid
+argsfile /run/openldap/slapd.args
+
+database mdb
+maxsize 1073741824
+suffix "dc=home,dc=local"
+rootdn "${BIND_DN}"
+rootpw "${LDAP_PASS}"
+directory /var/lib/openldap/openldap-data
+index objectClass eq
+
+# Verbiete anonyme Bind-Anfragen
+disallow bind_anon
+
+# Zugriff nur fuer authentifizierten Benutzer
+access to *
+    by dn="${BIND_DN}" write
+    by * none
+EOF
+
+else
+    bashio::log.info "LDAP-Authentifizierung DEAKTIVIERT (Anonymer Zugriff erlaubt, kein Benutzername/Passwort erforderlich)."
+
+    cat <<EOF > "${SLAPD_CONF}"
+include /etc/openldap/schema/core.schema
+include /etc/openldap/schema/cosine.schema
+include /etc/openldap/schema/inetorgperson.schema
+
+pidfile /run/openldap/slapd.pid
+argsfile /run/openldap/slapd.args
+
+database mdb
+maxsize 1073741824
+suffix "dc=home,dc=local"
+rootdn "cn=admin,dc=home,dc=local"
+rootpw "admin_internal"
+directory /var/lib/openldap/openldap-data
+index objectClass eq
+
+# Erlaube anonymen Lesezugriff
+access to *
+    by dn="cn=admin,dc=home,dc=local" write
+    by * read
+EOF
+fi
 
 bashio::log.info "Starte OpenLDAP (slapd)..."
-exec slapd -d 1 -u ldap -g ldap -f /etc/openldap/slapd.conf
+exec slapd -d 1 -u ldap -g ldap -f "${SLAPD_CONF}"

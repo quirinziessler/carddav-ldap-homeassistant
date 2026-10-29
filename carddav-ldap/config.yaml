@@ -1,5 +1,5 @@
 name: "CardDAV to OpenLDAP Bridge"
-version: "1.0.0"
+version: "1.1.0"
 slug: "carddav_openldap"
 description: "Robuster OpenLDAP-Server, der via Cron aus Apple iCloud synchronisiert wird."
 arch: ["aarch64", "amd64"]
@@ -9,10 +9,14 @@ options:
   icloud_user: "deine.apple.id@icloud.com"
   icloud_pass: "app-spezifisches-passwort"
   sync_interval_cron: "0 * * * *"
+  ldap_user: ""
+  ldap_pass: ""
 schema:
   icloud_user: str
   icloud_pass: password
   sync_interval_cron: str
+  ldap_user: str?
+  ldap_pass: password?
 ports:
   389/tcp: 389
 map:

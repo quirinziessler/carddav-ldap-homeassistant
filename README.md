@@ -14,8 +14,16 @@ Ideal geeignet als **zentrales Telefonbuch** für VoIP-Telefonsysteme wie die **
 
 - 🍏 **iCloud CardDAV Sync:** Synchronisiert automatisch Kontakte aus Apple iCloud.
 - 📇 **Integrierter OpenLDAP-Server:** Eigener vollwertiger `slapd`-Dienst auf Standardport `389` (MDB-Backend).
+- 📱 **Smarte Nummern-Zuordnung:** Erkennt und trennt automatisch:
+  - 🏠 **Privatnummer** (`homePhone`)
+  - 📱 **Mobil / iPhone** (`mobile`)
+  - 🏢 **Arbeitsnummer / Büro** (`telephoneNumber`)
+  - 📠 **Fax** (`facsimileTelephoneNumber`)
+- 🔒 **Flexible Authentifizierung:**
+  - **Ohne Passwort (Anonymous Bind):** Ideal für ein geschütztes Heim-/Büronetzwerk. Keine Zugangsdaten am Telefon nötig.
+  - **Mit Benutzername & Passwort:** Voller Schutz gegen unbefugte Abfragen.
+- 🧹 **Automatische Bereinigung:** Kontakte, die in iCloud gelöscht werden, verschwinden automatisch auch aus dem LDAP-Telefonbuch.
 - ⏱ **Automatischer Cronjob:** Konfigurierbares Synchronisationsintervall (standardmäßig stündlich).
-- ☎️ **Gigaset IP PRO Optimiert:** Mappt Adressbuchdaten sauber in das Standard-`inetOrgPerson`-LDAP-Schema (`cn`, `givenName`, `sn`, `telephoneNumber`).
 - 🏗 **Multi-Architektur:** Unterstützt `aarch64` (z. B. Raspberry Pi 4/5, Home Assistant Green/Yellow) und `amd64` (Intel/AMD x86_64 VMs, NUC, etc.).
 
 ---
@@ -35,21 +43,25 @@ Ideal geeignet als **zentrales Telefonbuch** für VoIP-Telefonsysteme wie die **
 
 ## ⚙️ Konfiguration
 
-Vor dem Start muss das Add-on unter dem Reiter **Konfiguration** eingerichtet werden:
+Vor dem Start kann das Add-on unter dem Reiter **Konfiguration** eingerichtet werden:
 
 ```yaml
 icloud_user: "deine.apple.id@icloud.com"
 icloud_pass: "xxxx-xxxx-xxxx-xxxx"
 sync_interval_cron: "0 * * * *"
+ldap_user: ""
+ldap_pass: ""
 ```
 
 ### Konfigurations-Optionen
 
-| Option | Typ | Beschreibung |
-| :--- | :--- | :--- |
-| `icloud_user` | String | Deine Apple-ID E-Mail-Adresse. |
-| `icloud_pass` | Password | Ein **anwendungsspezifisches Passwort** aus deinem Apple-Account (*nicht* dein normales Passwort!). |
-| `sync_interval_cron` | String | Cron-Ausdruck für das Synchronisationsintervall (z. B. `0 * * * *` für stündlich oder `*/15 * * * *` für alle 15 Min). |
+| Option | Typ | Standard | Beschreibung |
+| :--- | :--- | :--- | :--- |
+| `icloud_user` | String | *Pflicht* | Deine Apple-ID E-Mail-Adresse. |
+| `icloud_pass` | Password | *Pflicht* | Ein **anwendungsspezifisches Passwort** aus deinem Apple-Account (*nicht* dein normales Passwort!). |
+| `sync_interval_cron` | String | `0 * * * *` | Cron-Ausdruck für das Sync-Intervall (z. B. `0 * * * *` für stündlich oder `*/15 * * * *` für alle 15 Min). |
+| `ldap_user` | String | `""` *(leer)* | Optionaler LDAP-Benutzername. Wenn leer, ist kein Passwort am Telefon erforderlich (Anonymous Bind). |
+| `ldap_pass` | Password | `""` *(leer)* | Optionales LDAP-Passwort. Nur aktiv, wenn auch `ldap_user` befüllt ist. |
 
 > [!TIP]
 > **App-spezifisches Passwort erstellen:**
@@ -66,27 +78,41 @@ Um das Telefonbuch in der Gigaset N670 / N870 IP PRO Web-Oberfläche einzubinden
 1. Gehe im Webinterface der Gigaset-Basis zu **Einstellungen** → **Telefonie** → **LDAP** (bzw. **Online-Telefonbücher**).
 2. Trage folgende Werte ein:
 
-| Feld | Wert |
-| :--- | :--- |
-| **Serveradresse** | IP-Adresse deines Home Assistant Hosts |
-| **Serverport** | `389` |
-| **Basis-DN** | `ou=contacts,dc=home,dc=local` |
-| **Benutzername (Bind DN)** | `cn=admin,dc=home,dc=local` |
-| **Passwort** | `admin` |
-| **Suchfilter** | `(&(objectClass=inetOrgPerson)(|(cn=*%*)(sn=*%*)(telephoneNumber=*%*)))` |
+### Grunddaten:
+- **Serveradresse:** IP-Adresse deines Home Assistant Hosts
+- **Serverport:** `389`
+- **Basis-DN:** `ou=contacts,dc=home,dc=local`
+
+### Authentifizierung:
+- **Variante A: Ohne Passwort (wenn `ldap_user` & `ldap_pass` in HA leer sind):**
+  - **Benutzername:** *(leer lassen / Anonymous Bind aktivieren)*
+  - **Passwort:** *(leer lassen)*
+- **Variante B: Mit Passwort (wenn z. B. `ldap_user: "telefon"` und `ldap_pass: "geheim"` konfiguriert sind):**
+  - **Benutzername (Bind DN):** `cn=telefon,dc=home,dc=local`
+  - **Passwort:** `geheim`
+
+### Suchfilter:
+```text
+(&(objectClass=inetOrgPerson)(|(cn=*%*)(sn=*%*)(telephoneNumber=*%*)(homePhone=*%*)(mobile=*%*)))
+```
 
 ### Namens- und Nummern-Attribute (Mapping):
-- **Name / Nachname (sn):** `sn`
-- **Vorname (givenName):** `givenName`
-- **Anzeigename (cn):** `cn`
-- **Telefonnummer:** `telephoneNumber`
+| Gigaset Feld | LDAP Attribut | Herkunft aus iCloud |
+| :--- | :--- | :--- |
+| **Anzeigename** | `cn` | Vollständiger Name |
+| **Nachname** | `sn` | Nachname |
+| **Vorname** | `givenName` | Vorname |
+| **Büro / Telefon (geschäftlich)** | `telephoneNumber` | Arbeitsnummer (`WORK`) / Hauptnummer |
+| **Mobiltelefon** | `mobile` | Mobil / iPhone (`CELL`, `IPHONE`) |
+| **Privattelefon** | `homePhone` | Privatnummer (`HOME`, `PRIVATE`) |
+| **Fax** | `facsimileTelephoneNumber` | Faxnummer (`FAX`) |
 
 ---
 
 ## 🛠 Architektur & Technik
 
 Im Add-on Container laufen dank des Home Assistant `s6-overlay` zwei parallele Dienste:
-1. **`slapd`**: Der OpenLDAP-Dienst, gebunden an Port `389` mit `mdb`-Backend.
+1. **`slapd`**: Der OpenLDAP-Dienst, gebunden an Port `389` mit modernem `mdb`-Backend.
 2. **`crond` + `sync.py`**: Führt beim Containerstart einen initialen Abgleich durch und aktualisiert das Telefonbuch fortlaufend im definierten Intervall.
 
 ---

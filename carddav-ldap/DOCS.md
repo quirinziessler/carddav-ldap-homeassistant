@@ -15,11 +15,16 @@ Trage in der Add-on-Konfiguration deine Apple-ID und das generierte App-Passwort
 icloud_user: "deine.apple.id@icloud.com"
 icloud_pass: "xxxx-xxxx-xxxx-xxxx"
 sync_interval_cron: "0 * * * *"
+ldap_user: ""
+ldap_pass: ""
 ```
+
+* **Passwortschutz:** Wenn `ldap_user` und `ldap_pass` leer bleiben, ist der LDAP-Server anonym (ohne Passwort) erreichbar. Wenn du dort Werte hinterlegst, muss sich das Telefon mit diesen Zugangsdaten authentifizieren.
 
 ### 3. Add-on starten
 Starte das Add-on. Im Protokoll (Logs) siehst du:
 - Den Start des LDAP-Servers
+- Ob Authentifizierung aktiv ist
 - Den initialen Sync mit deinen iCloud-Kontakten
 
 ---
@@ -29,11 +34,15 @@ Starte das Add-on. Im Protokoll (Logs) siehst du:
 - **LDAP-Server:** `<IP deiner Home Assistant Instanz>`
 - **Port:** `389`
 - **Basis-DN:** `ou=contacts,dc=home,dc=local`
-- **Bind-DN:** `cn=admin,dc=home,dc=local`
-- **Passwort:** `admin`
+- **Authentifizierung:**
+  - Wenn in HA leer: Benutzername & Passwort leer lassen
+  - Wenn konfiguriert: Bind-DN `cn=<ldap_user>,dc=home,dc=local` und dein Passwort
 
 ### Attribut-Mapping
-- **Vorname:** `givenName`
-- **Nachname:** `sn`
 - **Anzeigename:** `cn`
-- **Telefonnummer:** `telephoneNumber`
+- **Nachname:** `sn`
+- **Vorname:** `givenName`
+- **Büro / Arbeit:** `telephoneNumber`
+- **Mobil / iPhone:** `mobile`
+- **Privat / Zu Hause:** `homePhone`
+- **Fax:** `facsimileTelephoneNumber`
