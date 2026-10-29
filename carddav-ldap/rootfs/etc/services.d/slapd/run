@@ -38,7 +38,7 @@ directory /var/lib/openldap/openldap-data
 
 index objectClass eq
 index cn,sn,givenName eq,sub
-index telephoneNumber,homePhone,mobile,facsimileTelephoneNumber eq,sub
+index telephoneNumber,homePhone,mobile eq,sub
 
 # Verbiete anonyme Bind-Anfragen
 disallow bind_anon
@@ -72,7 +72,7 @@ directory /var/lib/openldap/openldap-data
 
 index objectClass eq
 index cn,sn,givenName eq,sub
-index telephoneNumber,homePhone,mobile,facsimileTelephoneNumber eq,sub
+index telephoneNumber,homePhone,mobile eq,sub
 
 # Erlaube anonymen Lesezugriff
 access to *
