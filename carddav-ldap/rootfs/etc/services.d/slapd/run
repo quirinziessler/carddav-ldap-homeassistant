@@ -1,15 +1,20 @@
-#!/usr/bin/env bashio
+#!/usr/bin/with-contenv bashio
 
 mkdir -p /run/openldap
 mkdir -p /var/lib/openldap/openldap-data
 chown -R ldap:ldap /var/lib/openldap/openldap-data /run/openldap
 
-LDAP_USER=$(bashio::config 'ldap_user' '')
-LDAP_PASS=$(bashio::config 'ldap_pass' '')
+LDAP_USER=""
+LDAP_PASS=""
+
+if [ -f /data/options.json ]; then
+    LDAP_USER=$(jq -r '.ldap_user // ""' /data/options.json)
+    LDAP_PASS=$(jq -r '.ldap_pass // ""' /data/options.json)
+fi
 
 SLAPD_CONF="/etc/openldap/slapd.conf"
 
-if bashio::var.has_value "${LDAP_USER}" && bashio::var.has_value "${LDAP_PASS}"; then
+if [ -n "${LDAP_USER}" ] && [ -n "${LDAP_PASS}" ] && [ "${LDAP_USER}" != "null" ] && [ "${LDAP_PASS}" != "null" ]; then
     bashio::log.info "LDAP-Authentifizierung AKTIVIERT: Benutzer '${LDAP_USER}' mit Passwort konfiguriert."
     BIND_DN="cn=${LDAP_USER},dc=home,dc=local"
 
@@ -20,6 +25,9 @@ include /etc/openldap/schema/inetorgperson.schema
 
 pidfile /run/openldap/slapd.pid
 argsfile /run/openldap/slapd.args
+
+modulepath /usr/lib/openldap
+moduleload back_mdb.so
 
 database mdb
 maxsize 1073741824
@@ -48,6 +56,9 @@ include /etc/openldap/schema/inetorgperson.schema
 
 pidfile /run/openldap/slapd.pid
 argsfile /run/openldap/slapd.args
+
+modulepath /usr/lib/openldap
+moduleload back_mdb.so
 
 database mdb
 maxsize 1073741824
