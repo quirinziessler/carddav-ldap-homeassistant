@@ -212,10 +212,6 @@ class MergedContact:
         self.canonical_mobile_numbers = set()
 
 def are_names_compatible(name1, name2):
-    """
-    Prueft, ob zwei Kontaktnamen aehnlich genug fuer eine Zusammenfuehrung sind
-    (z. B. 'Erna Müller' & 'Oma Erna', 'Max Mustermann' & 'Mustermann Max').
-    """
     n1 = re.sub(r'[^\w\s]', '', name1.lower()).split()
     n2 = re.sub(r'[^\w\s]', '', name2.lower()).split()
 
@@ -226,7 +222,6 @@ def are_names_compatible(name1, name2):
     if not w1 and not w2:
         return True
 
-    # Wenn mindestens ein bedeutungsvolles Wort uebereinstimmt
     if set(w1) & set(w2):
         return True
 
@@ -251,9 +246,6 @@ def name_quality(fn, family, given):
     return score
 
 def extract_numbers_from_vcard(vcard, default_country="DE"):
-    """
-    Extrahiert alle Nummern aus der vCard, inklusive Apples gruppierter Eintraege (item1.TEL).
-    """
     home = set()
     work = set()
     mobile = set()
@@ -265,7 +257,6 @@ def extract_numbers_from_vcard(vcard, default_country="DE"):
     group_labels = {}
     tel_children = []
 
-    # getChildren() erfasst ALLE Zeilen, auch item1.TEL und item1.X-ABLabel
     for child in vcard.getChildren():
         name = child.name.upper()
         group = getattr(child, 'group', None)
@@ -354,7 +345,6 @@ def sync_contacts():
             except Exception:
                 continue
 
-            # FN ermitteln
             fn = ""
             if hasattr(vcard, 'fn'):
                 fn = str(vcard.fn.value).strip()
@@ -368,23 +358,15 @@ def sync_contacts():
             if not family_name:
                 family_name = fn
 
-            # Nummern extrahieren (unterstuetzt Apple item1.TEL)
             extracted = extract_numbers_from_vcard(vcard, default_country)
             temp_canonical = extracted['canonical']
 
-            # Wenn dieser Kontakt keinerlei Telefonnummern besitzt, ueberspringen
             if not temp_canonical:
                 continue
 
-            # Deduplizierungs-Logik:
-            # 1. Kontakte aus DEMSELBEN Account werden NIEMALS zusammengefuehrt! (Eigene Kontakte sind immer eigenstaendig)
-            # 2. Kontakte aus VERSCHIEDENEN Accounts werden nur zusammengefuehrt wenn:
-            #    - Gleiche Handynummer (gehoert eindeutig einer Person) ODER
-            #    - Gemeinsame Nummer UND aehnlicher Name
             target_contact = None
             for existing in merged_contacts:
                 if acc_idx in existing.account_ids:
-                    # Aus demselben Account -> nicht deduplizieren
                     continue
 
                 shares_mobile = bool(existing.canonical_mobile_numbers & extracted['canonical_mobile'])
@@ -419,7 +401,7 @@ def sync_contacts():
                 new_contact.other_numbers = extracted['other']
                 merged_contacts.append(new_contact)
 
-    print(f"Kontakte aus allen Accounts geladen ({total_raw_contacts} Rohkontakte empfangen). Insgesamt {len(merged_contacts)} Telefonbuch-Kontakte nach Deduplizierung.")
+    print(f"Kontakte aus allen Accounts geladen ({total_raw_contacts} Rohkontakte). Insgesamt {len(merged_contacts)} Telefonbuch-Kontakte nach Deduplizierung.")
 
     ldap_user = str(config.get('ldap_user') or '').strip()
     ldap_pass = str(config.get('ldap_pass') or '').strip()
@@ -435,11 +417,21 @@ def sync_contacts():
     server = Server('ldap://localhost:389', get_info=ALL)
     conn = Connection(server, bind_dn, bind_pw, auto_bind=True)
 
-    conn.add('ou=contacts,dc=home,dc=local', ['organizationalUnit'])
+    # 1. Basis Domain dc=home,dc=local anlegen (erforderlich als Elternknoten fuer alle Untereintraege)
+    conn.add('dc=home,dc=local', ['top', 'dcObject', 'organization'], {'dc': 'home', 'o': 'Home'})
+    if conn.result.get('description') not in ('success', 'entryAlreadyExists'):
+        print(f"Initialisierung dc=home,dc=local: {conn.result}")
+
+    # 2. OU ou=contacts,dc=home,dc=local anlegen
+    conn.add('ou=contacts,dc=home,dc=local', ['top', 'organizationalUnit'], {'ou': 'contacts'})
+    if conn.result.get('description') not in ('success', 'entryAlreadyExists'):
+        print(f"Initialisierung ou=contacts,dc=home,dc=local: {conn.result}")
 
     synced_dns = set()
     used_cns = {}
+    success_count = 0
 
+    print(f"Schreibe {len(merged_contacts)} Kontakte in LDAP...")
     for c in merged_contacts:
         cn = c.fn.strip()
         count = used_cns.get(cn, 0)
@@ -463,10 +455,12 @@ def sync_contacts():
         attrs = {
             'objectClass': ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
             'cn': unique_cn,
-            'sn': c.family_name,
-            'givenName': c.given_name,
+            'sn': c.family_name if c.family_name else unique_cn,
             'telephoneNumber': primary_telephones
         }
+        # givenName darf in LDAP niemals ein leerer String sein (RFC 4517 Syntax)
+        if c.given_name and c.given_name.strip():
+            attrs['givenName'] = c.given_name.strip()
         if mobile_list:
             attrs['mobile'] = mobile_list
         if home_list:
@@ -474,18 +468,32 @@ def sync_contacts():
         if fax_list:
             attrs['facsimileTelephoneNumber'] = fax_list
 
-        if not conn.add(dn, attributes=attrs):
-            mod_attrs = {
-                'sn': [(MODIFY_REPLACE, [c.family_name])],
-                'givenName': [(MODIFY_REPLACE, [c.given_name])],
-                'telephoneNumber': [(MODIFY_REPLACE, primary_telephones)],
-                'mobile': [(MODIFY_REPLACE, mobile_list if mobile_list else [])],
-                'homePhone': [(MODIFY_REPLACE, home_list if home_list else [])],
-                'facsimileTelephoneNumber': [(MODIFY_REPLACE, fax_list if fax_list else [])],
-            }
-            conn.modify(dn, mod_attrs)
+        if conn.add(dn, attributes=attrs):
+            success_count += 1
+        else:
+            if conn.result.get('description') == 'entryAlreadyExists':
+                mod_attrs = {
+                    'sn': [(MODIFY_REPLACE, [c.family_name if c.family_name else unique_cn])],
+                    'telephoneNumber': [(MODIFY_REPLACE, primary_telephones)],
+                    'mobile': [(MODIFY_REPLACE, mobile_list if mobile_list else [])],
+                    'homePhone': [(MODIFY_REPLACE, home_list if home_list else [])],
+                    'facsimileTelephoneNumber': [(MODIFY_REPLACE, fax_list if fax_list else [])],
+                }
+                if c.given_name and c.given_name.strip():
+                    mod_attrs['givenName'] = [(MODIFY_REPLACE, [c.given_name.strip()])]
+                else:
+                    mod_attrs['givenName'] = [(MODIFY_REPLACE, [])]
 
-    # Bereinige in iCloud geloeschte Kontakte aus LDAP (Attribut 'cn' statt 'dn' anfordern)
+                if conn.modify(dn, mod_attrs):
+                    success_count += 1
+                else:
+                    print(f"Fehler beim Aktualisieren von {dn}: {conn.result}")
+            else:
+                print(f"Fehler beim Hinzufügen von {dn}: {conn.result}")
+
+    print(f"LDAP-Bestand: {success_count} von {len(merged_contacts)} Kontakten erfolgreich in OpenLDAP hinterlegt.")
+
+    # Bereinige in iCloud geloeschte Kontakte aus LDAP
     try:
         conn.search('ou=contacts,dc=home,dc=local', '(objectClass=inetOrgPerson)', attributes=['cn'])
         for entry in conn.entries:
