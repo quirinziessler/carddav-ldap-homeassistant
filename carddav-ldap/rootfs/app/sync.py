@@ -193,19 +193,44 @@ def normalize_number(raw_num, default_country="DE"):
         digits = '+' + digits[2:]
     elif digits.startswith('+490'):
         digits = '+49' + digits[4:]
-    return digits, clean
+    if len(digits) >= 3:
+        return digits, clean
+    return None, None
 
 class MergedContact:
-    def __init__(self, fn, family_name, given_name):
+    def __init__(self, fn, family_name, given_name, account_id):
         self.fn = fn
         self.family_name = family_name
         self.given_name = given_name
+        self.account_ids = {account_id}
         self.home_numbers = set()
         self.work_numbers = set()
         self.mobile_numbers = set()
         self.fax_numbers = set()
         self.other_numbers = set()
         self.canonical_numbers = set()
+        self.canonical_mobile_numbers = set()
+
+def are_names_compatible(name1, name2):
+    """
+    Prueft, ob zwei Kontaktnamen aehnlich genug fuer eine Zusammenfuehrung sind
+    (z. B. 'Erna Müller' & 'Oma Erna', 'Max Mustermann' & 'Mustermann Max').
+    """
+    n1 = re.sub(r'[^\w\s]', '', name1.lower()).split()
+    n2 = re.sub(r'[^\w\s]', '', name2.lower()).split()
+
+    stopwords = {'mama', 'papa', 'mami', 'papi', 'oma', 'opa', 'mum', 'dad', 'dr', 'prof'}
+    w1 = [w for w in n1 if w not in stopwords and len(w) > 1]
+    w2 = [w for w in n2 if w not in stopwords and len(w) > 1]
+
+    if not w1 and not w2:
+        return True
+
+    # Wenn mindestens ein bedeutungsvolles Wort uebereinstimmt
+    if set(w1) & set(w2):
+        return True
+
+    return False
 
 def name_quality(fn, family, given):
     score = 0
@@ -225,6 +250,80 @@ def name_quality(fn, family, given):
 
     return score
 
+def extract_numbers_from_vcard(vcard, default_country="DE"):
+    """
+    Extrahiert alle Nummern aus der vCard, inklusive Apples gruppierter Eintraege (item1.TEL).
+    """
+    home = set()
+    work = set()
+    mobile = set()
+    fax = set()
+    other = set()
+    canonical_all = set()
+    canonical_mobile = set()
+
+    group_labels = {}
+    tel_children = []
+
+    # getChildren() erfasst ALLE Zeilen, auch item1.TEL und item1.X-ABLabel
+    for child in vcard.getChildren():
+        name = child.name.upper()
+        group = getattr(child, 'group', None)
+        if name in ('X-ABLABEL', 'X-LABEL') and group:
+            group_labels[group] = str(child.value).upper()
+        elif name == 'TEL' or name.endswith('.TEL'):
+            tel_children.append(child)
+
+    for tel in tel_children:
+        raw_val = getattr(tel, 'value', '')
+        canonical, display = normalize_number(raw_val, default_country)
+        if not canonical:
+            continue
+
+        canonical_all.add(canonical)
+
+        types = []
+        if hasattr(tel, 'params') and 'TYPE' in tel.params:
+            type_param = tel.params['TYPE']
+            if isinstance(type_param, list):
+                types = [t.upper() for t in type_param]
+            elif isinstance(type_param, str):
+                types = [type_param.upper()]
+
+        group = getattr(tel, 'group', None)
+        if group and group in group_labels:
+            lbl = group_labels[group]
+            if any(k in lbl for k in ('CELL', 'MOBILE', 'IPHONE', 'HANDY')):
+                types.append('CELL')
+            elif any(k in lbl for k in ('HOME', 'PRIVAT', 'ZUHAUSE')):
+                types.append('HOME')
+            elif any(k in lbl for k in ('WORK', 'ARBEIT', 'GESCHÄFT', 'BÜRO')):
+                types.append('WORK')
+            elif 'FAX' in lbl:
+                types.append('FAX')
+
+        if any(t in types for t in ('CELL', 'MOBILE', 'IPHONE')):
+            mobile.add(display)
+            canonical_mobile.add(canonical)
+        elif any(t in types for t in ('WORK', 'BUSINESS')):
+            work.add(display)
+        elif any(t in types for t in ('HOME', 'PRIVATE')):
+            home.add(display)
+        elif any(t in types for t in ('FAX',)):
+            fax.add(display)
+        else:
+            other.add(display)
+
+    return {
+        'home': home,
+        'work': work,
+        'mobile': mobile,
+        'fax': fax,
+        'other': other,
+        'canonical': canonical_all,
+        'canonical_mobile': canonical_mobile
+    }
+
 def sync_contacts():
     config = get_ha_config()
     accounts = get_accounts(config)
@@ -236,6 +335,7 @@ def sync_contacts():
 
     print(f"Starte Sync für {len(accounts)} iCloud-Account(s) (Standardland: {default_country})...")
     merged_contacts = []
+    total_raw_contacts = 0
 
     for acc_idx, acc in enumerate(accounts, start=1):
         user = acc['user']
@@ -243,6 +343,7 @@ def sync_contacts():
         try:
             vcard_strings = fetch_icloud_vcards(user, acc['pass'])
             print(f"  -> {len(vcard_strings)} Kontakte aus iCloud für {user} empfangen.")
+            total_raw_contacts += len(vcard_strings)
         except Exception as e:
             print(f"Fehler bei Verbindung mit {user}: {e}")
             continue
@@ -253,85 +354,72 @@ def sync_contacts():
             except Exception:
                 continue
 
-            if not hasattr(vcard, 'fn') or not hasattr(vcard, 'tel'):
-                continue
-
-            fn = str(vcard.fn.value).strip()
-            if not fn:
-                continue
+            # FN ermitteln
+            fn = ""
+            if hasattr(vcard, 'fn'):
+                fn = str(vcard.fn.value).strip()
 
             family_name = getattr(vcard, 'n', fn).value.family if hasattr(vcard, 'n') else fn
             given_name = getattr(vcard, 'n', fn).value.given if hasattr(vcard, 'n') else ''
+            if not fn:
+                fn = f"{given_name} {family_name}".strip()
+            if not fn:
+                continue
             if not family_name:
                 family_name = fn
 
-            temp_home = set()
-            temp_work = set()
-            temp_mobile = set()
-            temp_fax = set()
-            temp_other = set()
-            temp_canonical = set()
+            # Nummern extrahieren (unterstuetzt Apple item1.TEL)
+            extracted = extract_numbers_from_vcard(vcard, default_country)
+            temp_canonical = extracted['canonical']
 
-            tel_entries = getattr(vcard, 'contents', {}).get('tel', [])
-            for tel in tel_entries:
-                raw_val = getattr(tel, 'value', '')
-                canonical, display = normalize_number(raw_val, default_country)
-                if not canonical:
-                    continue
-
-                temp_canonical.add(canonical)
-
-                types = []
-                if hasattr(tel, 'params') and 'TYPE' in tel.params:
-                    type_param = tel.params['TYPE']
-                    if isinstance(type_param, list):
-                        types = [t.upper() for t in type_param]
-                    elif isinstance(type_param, str):
-                        types = [type_param.upper()]
-
-                if any(t in types for t in ['CELL', 'MOBILE', 'IPHONE']):
-                    temp_mobile.add(display)
-                elif any(t in types for t in ['WORK', 'BUSINESS']):
-                    temp_work.add(display)
-                elif any(t in types for t in ['HOME', 'PRIVATE']):
-                    temp_home.add(display)
-                elif any(t in types for t in ['FAX']):
-                    temp_fax.add(display)
-                else:
-                    temp_other.add(display)
-
+            # Wenn dieser Kontakt keinerlei Telefonnummern besitzt, ueberspringen
             if not temp_canonical:
                 continue
 
+            # Deduplizierungs-Logik:
+            # 1. Kontakte aus DEMSELBEN Account werden NIEMALS zusammengefuehrt! (Eigene Kontakte sind immer eigenstaendig)
+            # 2. Kontakte aus VERSCHIEDENEN Accounts werden nur zusammengefuehrt wenn:
+            #    - Gleiche Handynummer (gehoert eindeutig einer Person) ODER
+            #    - Gemeinsame Nummer UND aehnlicher Name
             target_contact = None
             for existing in merged_contacts:
-                if existing.canonical_numbers & temp_canonical:
+                if acc_idx in existing.account_ids:
+                    # Aus demselben Account -> nicht deduplizieren
+                    continue
+
+                shares_mobile = bool(existing.canonical_mobile_numbers & extracted['canonical_mobile'])
+                shares_any_number = bool(existing.canonical_numbers & temp_canonical)
+
+                if shares_mobile or (shares_any_number and are_names_compatible(existing.fn, fn)):
                     target_contact = existing
                     break
 
             if target_contact:
+                target_contact.account_ids.add(acc_idx)
                 target_contact.canonical_numbers.update(temp_canonical)
-                target_contact.home_numbers.update(temp_home)
-                target_contact.work_numbers.update(temp_work)
-                target_contact.mobile_numbers.update(temp_mobile)
-                target_contact.fax_numbers.update(temp_fax)
-                target_contact.other_numbers.update(temp_other)
+                target_contact.canonical_mobile_numbers.update(extracted['canonical_mobile'])
+                target_contact.home_numbers.update(extracted['home'])
+                target_contact.work_numbers.update(extracted['work'])
+                target_contact.mobile_numbers.update(extracted['mobile'])
+                target_contact.fax_numbers.update(extracted['fax'])
+                target_contact.other_numbers.update(extracted['other'])
 
                 if name_quality(fn, family_name, given_name) > name_quality(target_contact.fn, target_contact.family_name, target_contact.given_name):
                     target_contact.fn = fn
                     target_contact.family_name = family_name
                     target_contact.given_name = given_name
             else:
-                new_contact = MergedContact(fn, family_name, given_name)
+                new_contact = MergedContact(fn, family_name, given_name, acc_idx)
                 new_contact.canonical_numbers = temp_canonical
-                new_contact.home_numbers = temp_home
-                new_contact.work_numbers = temp_work
-                new_contact.mobile_numbers = temp_mobile
-                new_contact.fax_numbers = temp_fax
-                new_contact.other_numbers = temp_other
+                new_contact.canonical_mobile_numbers = extracted['canonical_mobile']
+                new_contact.home_numbers = extracted['home']
+                new_contact.work_numbers = extracted['work']
+                new_contact.mobile_numbers = extracted['mobile']
+                new_contact.fax_numbers = extracted['fax']
+                new_contact.other_numbers = extracted['other']
                 merged_contacts.append(new_contact)
 
-    print(f"Kontakte aus allen Accounts geladen. Insgesamt {len(merged_contacts)} eindeutige Kontakte nach Deduplizierung.")
+    print(f"Kontakte aus allen Accounts geladen ({total_raw_contacts} Rohkontakte empfangen). Insgesamt {len(merged_contacts)} Telefonbuch-Kontakte nach Deduplizierung.")
 
     ldap_user = str(config.get('ldap_user') or '').strip()
     ldap_pass = str(config.get('ldap_pass') or '').strip()
