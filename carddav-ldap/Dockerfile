@@ -9,7 +9,7 @@ RUN apk add --no-cache \
     py3-pip \
     jq
 
-RUN pip3 install --break-system-packages caldav ldap3 vobject
+RUN pip3 install --break-system-packages caldav ldap3 vobject phonenumbers
 
 COPY rootfs /
 

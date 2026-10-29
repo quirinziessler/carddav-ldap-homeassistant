@@ -4,17 +4,21 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Architectures](https://img.shields.io/badge/arch-amd64%20%7C%20aarch64-blue)
 
-Ein Home Assistant Add-on, das Kontakte aus einem **Apple iCloud CardDAV-Adressbuch** automatisch in einen lokalen **OpenLDAP-Server (`slapd`)** synchronisiert.
+Ein Home Assistant Add-on, das Kontakte aus einem oder **mehreren Apple iCloud CardDAV-Adressbüchern** automatisch in einen lokalen **OpenLDAP-Server (`slapd`)** synchronisiert.
 
-Ideal geeignet als **zentrales Telefonbuch** für VoIP-Telefonsysteme wie die **Gigaset N670 / N870 IP PRO** DECT-Basis, Gigaset Maxwell, Yealink, Snom oder andere LDAP-fähige IP-Telefone.
+Ideal geeignet als **zentrales Familien- und Firmen-Telefonbuch** für VoIP-Telefonsysteme wie die **Gigaset N670 / N870 IP PRO** DECT-Basis, Gigaset Maxwell, Yealink, Snom oder andere LDAP-fähige IP-Telefone.
 
 ---
 
 ## 🚀 Features
 
-- 🍏 **iCloud CardDAV Sync:** Synchronisiert automatisch Kontakte aus Apple iCloud.
+- 👨‍👩‍👧‍👦 **Multi-Apple-ID Support:** Synchronisiert Kontakte von mehreren Familienmitgliedern aus verschiedenen iCloud-Accounts zusammen.
+- 🧠 **Smarte Deduplizierung & Normalisierung:**
+  - Nutzt Google's `libphonenumber`-Standard zur Erkennung und Formatierung von Nummern.
+  - Erkennt Dubletten über unterschiedliche Schreibweisen hinweg (z. B. `089 123456`, `+49 89 123456`, `0049 89 123456`, `+49 (0) 89 123456`).
+  - **Intelligente Namenswahl:** Wenn Person A "Erna Müller" und Person B "Oma Erna" gespeichert hat, wird automatisch der vollständige Name gewählt und alle Nummern zusammengeführt!
 - 📇 **Integrierter OpenLDAP-Server:** Eigener vollwertiger `slapd`-Dienst auf Standardport `389` (MDB-Backend).
-- 📱 **Smarte Nummern-Zuordnung:** Erkennt und trennt automatisch:
+- 📱 **Smarte Nummern-Zuordnung:** Erkennt und trennt:
   - 🏠 **Privatnummer** (`homePhone`)
   - 📱 **Mobil / iPhone** (`mobile`)
   - 🏢 **Arbeitsnummer / Büro** (`telephoneNumber`)
@@ -43,11 +47,15 @@ Ideal geeignet als **zentrales Telefonbuch** für VoIP-Telefonsysteme wie die **
 
 ## ⚙️ Konfiguration
 
-Vor dem Start kann das Add-on unter dem Reiter **Konfiguration** eingerichtet werden:
+Unter dem Reiter **Konfiguration** kannst du beliebig viele Apple-IDs hinterlegen:
 
 ```yaml
-icloud_user: "deine.apple.id@icloud.com"
-icloud_pass: "xxxx-xxxx-xxxx-xxxx"
+accounts:
+  - user: "papa@icloud.com"
+    pass: "xxxx-xxxx-xxxx-xxxx"
+  - user: "mama@icloud.com"
+    pass: "yyyy-yyyy-yyyy-yyyy"
+default_country: "DE"
 sync_interval_cron: "0 * * * *"
 ldap_user: ""
 ldap_pass: ""
@@ -57,17 +65,15 @@ ldap_pass: ""
 
 | Option | Typ | Standard | Beschreibung |
 | :--- | :--- | :--- | :--- |
-| `icloud_user` | String | *Pflicht* | Deine Apple-ID E-Mail-Adresse. |
-| `icloud_pass` | Password | *Pflicht* | Ein **anwendungsspezifisches Passwort** aus deinem Apple-Account (*nicht* dein normales Passwort!). |
+| `accounts` | Liste | *(mind. 1)* | Liste aller Apple-IDs mit jeweils einem **app-spezifischen Passwort**. |
+| `default_country` | String | `"DE"` | Zweibuchstabiger Ländercode (z. B. `DE`, `AT`, `CH`) zur korrekten Erkennung lokaler Nummern ohne Ländervorwahl. |
 | `sync_interval_cron` | String | `0 * * * *` | Cron-Ausdruck für das Sync-Intervall (z. B. `0 * * * *` für stündlich oder `*/15 * * * *` für alle 15 Min). |
 | `ldap_user` | String | `""` *(leer)* | Optionaler LDAP-Benutzername. Wenn leer, ist kein Passwort am Telefon erforderlich (Anonymous Bind). |
 | `ldap_pass` | Password | `""` *(leer)* | Optionales LDAP-Passwort. Nur aktiv, wenn auch `ldap_user` befüllt ist. |
 
 > [!TIP]
 > **App-spezifisches Passwort erstellen:**
-> 1. Melde dich auf [appleid.apple.com](https://appleid.apple.com/) an.
-> 2. Gehe zu **Anmelden und Sicherheit** → **App-spezifische Passwörter**.
-> 3. Erstelle ein neues Passwort (z. B. mit dem Namen "Home Assistant LDAP").
+> Jedes Familienmitglied meldet sich kurz auf [appleid.apple.com](https://appleid.apple.com/) an, geht auf **Anmelden und Sicherheit** → **App-spezifische Passwörter** und erstellt ein Passwort (z. B. "Festnetz-Telefonbuch").
 
 ---
 
@@ -106,14 +112,6 @@ Um das Telefonbuch in der Gigaset N670 / N870 IP PRO Web-Oberfläche einzubinden
 | **Mobiltelefon** | `mobile` | Mobil / iPhone (`CELL`, `IPHONE`) |
 | **Privattelefon** | `homePhone` | Privatnummer (`HOME`, `PRIVATE`) |
 | **Fax** | `facsimileTelephoneNumber` | Faxnummer (`FAX`) |
-
----
-
-## 🛠 Architektur & Technik
-
-Im Add-on Container laufen dank des Home Assistant `s6-overlay` zwei parallele Dienste:
-1. **`slapd`**: Der OpenLDAP-Dienst, gebunden an Port `389` mit modernem `mdb`-Backend.
-2. **`crond` + `sync.py`**: Führt beim Containerstart einen initialen Abgleich durch und aktualisiert das Telefonbuch fortlaufend im definierten Intervall.
 
 ---
 

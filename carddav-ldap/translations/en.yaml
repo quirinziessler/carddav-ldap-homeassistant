@@ -1,10 +1,10 @@
 configuration:
-  icloud_user:
-    name: "Apple ID Email"
-    description: "Your iCloud / Apple ID email address."
-  icloud_pass:
-    name: "App-Specific Apple Password"
-    description: "Create an app-specific password on appleid.apple.com (not your main Apple password!)."
+  accounts:
+    name: "Apple iCloud Accounts"
+    description: "Add as many Apple IDs from your family as you want."
+  default_country:
+    name: "Default Country Code"
+    description: "Country code (e.g. 'DE', 'AT', 'CH') for parsing and intelligent deduplication of local phone numbers."
   sync_interval_cron:
     name: "Sync Interval (Cron)"
     description: "Cron expression for the sync interval (e.g. '0 * * * *' for hourly or '*/15 * * * *' for every 15 min)."
