@@ -1,0 +1,7 @@
+#!/usr/bin/env bashio
+
+mkdir -p /run/openldap
+mkdir -p /var/lib/openldap/openldap-data
+
+bashio::log.info "Starte OpenLDAP (slapd)..."
+exec slapd -d 1 -u ldap -g ldap -f /etc/openldap/slapd.conf

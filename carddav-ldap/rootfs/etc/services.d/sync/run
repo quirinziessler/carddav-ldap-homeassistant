@@ -1,0 +1,15 @@
+#!/usr/bin/env bashio
+
+bashio::log.info "Konfiguriere CardDAV Sync..."
+
+CRON_SCHEDULE=$(bashio::config 'sync_interval_cron')
+echo "$CRON_SCHEDULE python3 /app/sync.py > /proc/1/fd/1 2>&1" > /etc/crontabs/root
+
+bashio::log.info "Warte 10 Sekunden bis LDAP hochgefahren ist..."
+sleep 10
+
+bashio::log.info "Führe initialen Sync aus..."
+python3 /app/sync.py
+
+bashio::log.info "Starte Cron-Daemon für fortlaufenden Sync..."
+exec crond -f -l 2
