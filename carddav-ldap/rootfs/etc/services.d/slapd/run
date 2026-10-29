@@ -36,7 +36,8 @@ rootdn "${BIND_DN}"
 rootpw "${LDAP_PASS}"
 directory /var/lib/openldap/openldap-data
 
-index objectClass,cn,sn,givenName eq,sub
+index objectClass eq
+index cn,sn,givenName eq,sub
 index telephoneNumber,homePhone,mobile,facsimileTelephoneNumber eq,sub
 
 # Verbiete anonyme Bind-Anfragen
@@ -69,7 +70,8 @@ rootdn "cn=admin,dc=home,dc=local"
 rootpw "admin_internal"
 directory /var/lib/openldap/openldap-data
 
-index objectClass,cn,sn,givenName eq,sub
+index objectClass eq
+index cn,sn,givenName eq,sub
 index telephoneNumber,homePhone,mobile,facsimileTelephoneNumber eq,sub
 
 # Erlaube anonymen Lesezugriff
