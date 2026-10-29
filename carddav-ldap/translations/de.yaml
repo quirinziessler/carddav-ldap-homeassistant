@@ -1,0 +1,16 @@
+configuration:
+  icloud_user:
+    name: "Apple ID E-Mail-Adresse"
+    description: "Deine iCloud / Apple-ID E-Mail-Adresse."
+  icloud_pass:
+    name: "App-spezifisches Apple Passwort"
+    description: "Erstelle ein app-spezifisches Passwort auf appleid.apple.com (nicht dein Hauptpasswort!)."
+  sync_interval_cron:
+    name: "Sync-Intervall (Cron)"
+    description: "Cron-Ausdruck für das Synchronisationsintervall (z. B. '0 * * * *' für stündlich oder '*/15 * * * *' für alle 15 Min)."
+  ldap_user:
+    name: "LDAP-Benutzername (Optional)"
+    description: "Benutzername für dein Telefon (z. B. 'telefon'). Leer lassen für passwortfreien Zugriff (Anonymous Bind)."
+  ldap_pass:
+    name: "LDAP-Passwort (Optional)"
+    description: "Passwort für dein Telefon. Leer lassen, wenn kein Passwort gewünscht ist."
