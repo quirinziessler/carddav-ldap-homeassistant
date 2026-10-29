@@ -28,7 +28,8 @@ jobs:
         uses: home-assistant/builder@master
         with:
           args: |
-            --all \
+            --amd64 \
+            --aarch64 \
             --target carddav-ldap \
             --image "ghcr.io/${{ github.repository_owner }}/carddav-ldap-homeassistant-{arch}" \
             --docker-hub ghcr.io

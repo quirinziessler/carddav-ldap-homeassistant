@@ -2,7 +2,7 @@ name: "CardDAV to OpenLDAP Bridge"
 version: "1.0.0"
 slug: "carddav_openldap"
 description: "Robuster OpenLDAP-Server, der via Cron aus Apple iCloud synchronisiert wird."
-arch: ["aarch64", "amd64", "armv7"]
+arch: ["aarch64", "amd64"]
 init: false
 image: "ghcr.io/quirinziessler/carddav-ldap-homeassistant-{arch}"
 options:
