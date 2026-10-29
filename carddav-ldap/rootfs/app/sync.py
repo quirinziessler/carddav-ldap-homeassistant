@@ -172,13 +172,33 @@ def fetch_icloud_vcards(user, password):
 
     return vcard_strings
 
+def deduplicate_ldap_telephones(numbers_list):
+    """
+    Entfernt Rufnummern-Duplikate unter Beruecksichtigung der LDAP telephoneNumberMatch-Regel.
+    In OpenLDAP gelten zwei Nummern als identisch, wenn sie nach Entfernen von Leerzeichen
+    und Bindestrichen die gleichen Ziffern haben. Diese Funktion stellt sicher, dass kein
+    Attribut dieselbe Ziffernfolge doppelt erhaelt (verhindert LDAP result 20 attributeOrValueExists).
+    """
+    seen_keys = set()
+    result = []
+    for num in numbers_list:
+        clean_str = str(num or '').strip()
+        if not clean_str:
+            continue
+        key = re.sub(r'[\s\-]', '', clean_str)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            result.append(clean_str)
+    return result
+
 def get_number_variants(raw_num, default_country="DE"):
     """
-    Erzeugt fuer eine Rufnummer alle gaengigen Formate (E.164, National, ohne Leerzeichen, 00...):
-    - Erstes Element ist das schoene internationale Format fuers Display (+49 162 1234567)
-    - Nachfolgende Elemente sind nationale und reine Ziffern-Varianten (01621234567, +491621234567...)
-      fuer die eingehende Rufnummern-Erkennung (CLIP / Rueckwaertssuche).
-    Liefert (canonical_e164, list_of_variants)
+    Erzeugt fuer eine Rufnummer das internationale und nationale Format:
+    - 1. Internationales Format (+49 162 1234567) fuer die Handset-Anzeige
+    - 2. Nationales Format (0162 1234567) fuer Anrufe aus dem deutschen Festnetz/Mobilfunk
+    - 3. 00-Format (0049 162 1234567) fuer Provider, die 00 senden
+    Dank telephoneNumberMatch in OpenLDAP matchen Leerzeichen-freie Anrufe (z. B. '01621234567')
+    automatisch auf '0162 1234567', ohne dass beide Strings doppelt in LDAP stehen muessen!
     """
     clean = str(raw_num or '').strip()
     if not clean:
@@ -193,29 +213,17 @@ def get_number_variants(raw_num, default_country="DE"):
             canonical_e164 = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
             intl_display = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
             nat_display = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.NATIONAL)
-            nat_digits = re.sub(r'[^\d]', '', nat_display)
-            e164_digits = canonical_e164
 
-            # 1. Hauptanzeige (Display am Handset)
+            # 1. Hauptanzeige (International: +49 162 1234567)
             variants.append(intl_display)
 
-            # 2. National ohne Leerzeichen (z. B. '01621234567' wie von Telekom/Fritz!Box signalisiert)
-            if nat_digits and nat_digits not in variants:
-                variants.append(nat_digits)
+            # 2. National (0162 1234567 - matcht bei eingehendem Anruf '01621234567')
+            variants.append(nat_display)
 
-            # 3. E.164 ohne Leerzeichen (z. B. '+491621234567')
-            if e164_digits and e164_digits not in variants:
-                variants.append(e164_digits)
-
-            # 4. National mit Leerzeichen ('0162 1234567')
-            if nat_display and nat_display not in variants:
-                variants.append(nat_display)
-
-            # 5. International mit 00 ('00491621234567')
+            # 3. International mit 00 (0049 162 1234567)
             if canonical_e164.startswith('+'):
-                zerozero = '00' + canonical_e164[1:]
-                if zerozero not in variants:
-                    variants.append(zerozero)
+                zerozero = '00' + intl_display[1:]
+                variants.append(zerozero)
     except Exception:
         pass
 
@@ -224,12 +232,11 @@ def get_number_variants(raw_num, default_country="DE"):
     if len(digits) >= 3:
         if not canonical_e164:
             canonical_e164 = digits
-        if clean not in variants:
-            variants.append(clean)
-        if digits not in variants:
-            variants.append(digits)
+        variants.append(clean)
 
-    return canonical_e164, variants
+    # Strikte Bereinigung gemaess LDAP telephoneNumberMatch
+    clean_variants = deduplicate_ldap_telephones(variants)
+    return canonical_e164, clean_variants
 
 class MergedContact:
     def __init__(self, fn, family_name, given_name, account_id):
@@ -340,11 +347,11 @@ def extract_numbers_from_vcard(vcard, default_country="DE"):
             other.extend(variants)
 
     return {
-        'home': home,
-        'work': work,
-        'mobile': mobile,
-        'fax': fax,
-        'other': other,
+        'home': deduplicate_ldap_telephones(home),
+        'work': deduplicate_ldap_telephones(work),
+        'mobile': deduplicate_ldap_telephones(mobile),
+        'fax': deduplicate_ldap_telephones(fax),
+        'other': deduplicate_ldap_telephones(other),
         'canonical': canonical_all,
         'canonical_mobile': canonical_mobile
     }
@@ -472,16 +479,16 @@ def sync_contacts():
         used_cns[cn] = count + 1
         unique_cn = cn if count == 0 else f"{cn} ({count + 1})"
 
-        # Eindeutige Listen unter Beibehaltung der Reihenfolge (Hauptanzeige zuerst, dann CLIP-Ziffern)
-        work_list = list(dict.fromkeys(c.work_numbers))
-        home_list = list(dict.fromkeys(c.home_numbers))
-        mobile_list = list(dict.fromkeys(c.mobile_numbers))
-        fax_list = list(dict.fromkeys(c.fax_numbers))
-        other_list = list(dict.fromkeys(c.other_numbers))
+        # Eindeutige Listen unter Beruecksichtigung von OpenLDAP's telephoneNumberMatch
+        work_list = deduplicate_ldap_telephones(c.work_numbers)
+        home_list = deduplicate_ldap_telephones(c.home_numbers)
+        mobile_list = deduplicate_ldap_telephones(c.mobile_numbers)
+        fax_list = deduplicate_ldap_telephones(c.fax_numbers)
+        other_list = deduplicate_ldap_telephones(c.other_numbers)
 
-        primary_telephones = list(dict.fromkeys(work_list + other_list))
+        primary_telephones = deduplicate_ldap_telephones(work_list + other_list)
         if not primary_telephones:
-            primary_telephones = list(dict.fromkeys(mobile_list + home_list))
+            primary_telephones = deduplicate_ldap_telephones(mobile_list + home_list)
 
         escaped_cn = escape_rdn(unique_cn)
         dn = f'cn={escaped_cn},ou=contacts,dc=home,dc=local'
