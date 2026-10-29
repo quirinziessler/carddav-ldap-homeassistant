@@ -7,6 +7,9 @@ RUN apk add --no-cache \
     openldap-back-mdb \
     python3 \
     py3-pip \
+    py3-lxml \
+    py3-cryptography \
+    py3-requests \
     jq
 
 RUN pip3 install --break-system-packages caldav ldap3 vobject phonenumbers
