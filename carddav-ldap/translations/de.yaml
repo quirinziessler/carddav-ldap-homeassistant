@@ -14,3 +14,21 @@ configuration:
   ldap_pass:
     name: "LDAP-Passwort (Optional)"
     description: "Passwort für dein Telefon. Leer lassen, wenn kein Passwort gewünscht ist."
+  unifi_talk_enabled:
+    name: "UniFi Talk Synchronisation aktivieren"
+    description: "Schaltet den automatischen Sync der Kontakte direkt in deine UniFi Console (Talk) ein."
+  unifi_talk_host:
+    name: "UniFi Console IP / Hostname"
+    description: "IP-Adresse oder Hostname deiner UniFi Console (z. B. 192.168.1.1 oder udm.local)."
+  unifi_talk_user:
+    name: "UniFi OS Benutzername"
+    description: "Lokaler Benutzername auf deiner UniFi Console mit Rechten für UniFi Talk."
+  unifi_talk_pass:
+    name: "UniFi OS Passwort"
+    description: "Passwort des UniFi OS Benutzers."
+  unifi_talk_contact_list:
+    name: "UniFi Talk Kontaktliste"
+    description: "Name der Kontaktliste in UniFi Talk, in die Kontakte abgelegt werden sollen (z. B. 'iCloud' oder 'Familie')."
+  unifi_talk_verify_ssl:
+    name: "UniFi SSL-Zertifikat prüfen"
+    description: "Bei selbstsignierten Zertifikaten im lokalen Netzwerk deaktiviert lassen (false)."

@@ -26,12 +26,6 @@ ldap_pass: ""
 * **Deduplizierung:** Kontakte mit denselben Nummern (egal ob als `+49 89...`, `089...` oder `0049 89...` gespeichert) werden automatisch zusammengeführt.
 * **Passwortschutz:** Wenn `ldap_user` und `ldap_pass` leer bleiben, ist der LDAP-Server anonym (ohne Passwort) erreichbar. Wenn du dort Werte hinterlegst, muss sich das Telefon mit diesen Zugangsdaten authentifizieren.
 
-### 3. Add-on starten
-Starte das Add-on. Im Protokoll (Logs) siehst du:
-- Die Verbindung zu allen konfigurierten iCloud-Accounts
-- Die Anzahl gefundener und deduplizierter Kontakte
-- Den Start des LDAP-Servers
-
 ---
 
 ## VoIP-Telefon Anbindung (z. B. Gigaset N670 IP PRO)
@@ -51,3 +45,21 @@ Starte das Add-on. Im Protokoll (Logs) siehst du:
 - **Mobil / iPhone:** `mobile`
 - **Privat / Zu Hause:** `homePhone`
 - **Fax:** `facsimileTelephoneNumber`
+
+---
+
+## Optionale UniFi Talk Integration
+
+Um Kontakte automatisch direkt in **UniFi Talk** zu synchronisieren:
+
+1. **Lokalen Benutzer auf UniFi Console erstellen:**
+   - Gehe auf deiner UniFi Console (UDM / Cloud Key) auf **Admins** und lege einen lokalen Administrator (z. B. `ha-talk`) mit Rechten für UniFi Talk an.
+2. **Im Add-on konfigurieren:**
+   - `unifi_talk_enabled`: `true`
+   - `unifi_talk_host`: IP deiner UniFi Console (z. B. `192.168.1.1`)
+   - `unifi_talk_user`: `ha-talk`
+   - `unifi_talk_pass`: Dein vergebenes Passwort
+   - `unifi_talk_contact_list`: Name der Liste (z. B. `iCloud`)
+   - `unifi_talk_verify_ssl`: `false` (bei lokalem selbstsigniertem Zertifikat)
+3. Beim nächsten Sync-Lauf erscheinen alle Kontakte in UniFi Talk unter **Contacts** und stehen allen UniFi Talk Telefonen zur Verfügung.
+4. Im Home Assistant `/share`-Verzeichnis wird parallel eine `unifi_talk_contacts.csv` als Backup abgelegt.

@@ -1,7 +1,7 @@
 name: "CardDAV to OpenLDAP Bridge"
-version: "1.2.8"
+version: "1.3.0"
 slug: "carddav_openldap"
-description: "Robuster OpenLDAP-Server, der via Cron aus Apple iCloud synchronisiert wird."
+description: "Robuster OpenLDAP-Server mit optionalem UniFi Talk Sync, der via Cron aus Apple iCloud synchronisiert wird."
 arch: ["aarch64", "amd64"]
 init: false
 image: "ghcr.io/quirinziessler/carddav-ldap-homeassistant-{arch}"
@@ -14,6 +14,12 @@ options:
   sync_interval_cron: "0 * * * *"
   ldap_user: ""
   ldap_pass: ""
+  unifi_talk_enabled: false
+  unifi_talk_host: ""
+  unifi_talk_user: ""
+  unifi_talk_pass: ""
+  unifi_talk_contact_list: "iCloud"
+  unifi_talk_verify_ssl: false
 schema:
   accounts:
     - user: str
@@ -22,7 +28,14 @@ schema:
   sync_interval_cron: str
   ldap_user: str?
   ldap_pass: password?
+  unifi_talk_enabled: bool?
+  unifi_talk_host: str?
+  unifi_talk_user: str?
+  unifi_talk_pass: password?
+  unifi_talk_contact_list: str?
+  unifi_talk_verify_ssl: bool?
 ports:
   389/tcp: 389
 map:
   - config:rw
+  - share:rw

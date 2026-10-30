@@ -1,5 +1,6 @@
 import os
 import re
+import csv
 import json
 import socket
 import xml.etree.ElementTree as ET
@@ -173,12 +174,6 @@ def fetch_icloud_vcards(user, password):
     return vcard_strings
 
 def deduplicate_ldap_telephones(numbers_list):
-    """
-    Entfernt Rufnummern-Duplikate unter Beruecksichtigung der LDAP telephoneNumberMatch-Regel.
-    In OpenLDAP gelten zwei Nummern als identisch, wenn sie nach Entfernen von Leerzeichen
-    und Bindestrichen die gleichen Ziffern haben. Diese Funktion stellt sicher, dass kein
-    Attribut dieselbe Ziffernfolge doppelt erhaelt (verhindert LDAP result 20 attributeOrValueExists).
-    """
     seen_keys = set()
     result = []
     for num in numbers_list:
@@ -192,14 +187,6 @@ def deduplicate_ldap_telephones(numbers_list):
     return result
 
 def get_number_variants(raw_num, default_country="DE"):
-    """
-    Erzeugt fuer eine Rufnummer das internationale und nationale Format:
-    - 1. Internationales Format (+49 162 1234567) fuer die Handset-Anzeige
-    - 2. Nationales Format (0162 1234567) fuer Anrufe aus dem deutschen Festnetz/Mobilfunk
-    - 3. 00-Format (0049 162 1234567) fuer Provider, die 00 senden
-    Dank telephoneNumberMatch in OpenLDAP matchen Leerzeichen-freie Anrufe (z. B. '01621234567')
-    automatisch auf '0162 1234567', ohne dass beide Strings doppelt in LDAP stehen muessen!
-    """
     clean = str(raw_num or '').strip()
     if not clean:
         return None, []
@@ -214,35 +201,30 @@ def get_number_variants(raw_num, default_country="DE"):
             intl_display = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
             nat_display = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.NATIONAL)
 
-            # 1. Hauptanzeige (International: +49 162 1234567)
             variants.append(intl_display)
-
-            # 2. National (0162 1234567 - matcht bei eingehendem Anruf '01621234567')
             variants.append(nat_display)
 
-            # 3. International mit 00 (0049 162 1234567)
             if canonical_e164.startswith('+'):
                 zerozero = '00' + intl_display[1:]
                 variants.append(zerozero)
     except Exception:
         pass
 
-    # Fallback bei internen Nebenstellen oder Sondernummern
     digits = re.sub(r'[^\d+]', '', clean)
     if len(digits) >= 3:
         if not canonical_e164:
             canonical_e164 = digits
         variants.append(clean)
 
-    # Strikte Bereinigung gemaess LDAP telephoneNumberMatch
     clean_variants = deduplicate_ldap_telephones(variants)
     return canonical_e164, clean_variants
 
 class MergedContact:
-    def __init__(self, fn, family_name, given_name, account_id):
+    def __init__(self, fn, family_name, given_name, account_id, email=""):
         self.fn = fn
         self.family_name = family_name
         self.given_name = given_name
+        self.email = email
         self.account_ids = {account_id}
         self.home_numbers = []
         self.work_numbers = []
@@ -251,6 +233,10 @@ class MergedContact:
         self.other_numbers = []
         self.canonical_numbers = set()
         self.canonical_mobile_numbers = set()
+        self.canonical_mobile = []
+        self.canonical_home = []
+        self.canonical_work = []
+        self.canonical_other = []
 
 def are_names_compatible(name1, name2):
     n1 = re.sub(r'[^\w\s]', '', name1.lower()).split()
@@ -295,8 +281,14 @@ def extract_numbers_from_vcard(vcard, default_country="DE"):
     canonical_all = set()
     canonical_mobile = set()
 
+    canonical_mobile_list = []
+    canonical_home_list = []
+    canonical_work_list = []
+    canonical_other_list = []
+
     group_labels = {}
     tel_children = []
+    email = ""
 
     for child in vcard.getChildren():
         name = child.name.upper()
@@ -305,6 +297,9 @@ def extract_numbers_from_vcard(vcard, default_country="DE"):
             group_labels[group] = str(child.value).upper()
         elif name == 'TEL' or name.endswith('.TEL'):
             tel_children.append(child)
+        elif name == 'EMAIL' or name.endswith('.EMAIL'):
+            if not email:
+                email = str(child.value).strip()
 
     for tel in tel_children:
         raw_val = getattr(tel, 'value', '')
@@ -337,14 +332,18 @@ def extract_numbers_from_vcard(vcard, default_country="DE"):
         if any(t in types for t in ('CELL', 'MOBILE', 'IPHONE')):
             mobile.extend(variants)
             canonical_mobile.add(canonical)
+            canonical_mobile_list.append(canonical)
         elif any(t in types for t in ('WORK', 'BUSINESS')):
             work.extend(variants)
+            canonical_work_list.append(canonical)
         elif any(t in types for t in ('HOME', 'PRIVATE')):
             home.extend(variants)
+            canonical_home_list.append(canonical)
         elif any(t in types for t in ('FAX',)):
             fax.extend(variants)
         else:
             other.extend(variants)
+            canonical_other_list.append(canonical)
 
     return {
         'home': deduplicate_ldap_telephones(home),
@@ -353,8 +352,252 @@ def extract_numbers_from_vcard(vcard, default_country="DE"):
         'fax': deduplicate_ldap_telephones(fax),
         'other': deduplicate_ldap_telephones(other),
         'canonical': canonical_all,
-        'canonical_mobile': canonical_mobile
+        'canonical_mobile': canonical_mobile,
+        'canonical_mobile_list': canonical_mobile_list,
+        'canonical_home_list': canonical_home_list,
+        'canonical_work_list': canonical_work_list,
+        'canonical_other_list': canonical_other_list,
+        'email': email
     }
+
+def sync_unifi_talk(merged_contacts, config):
+    """
+    Synchronisiert Kontakte via REST-API direkt in UniFi Talk (Console / UDM / Cloud Key).
+    """
+    if not config.get('unifi_talk_enabled', False):
+        return
+
+    host = str(config.get('unifi_talk_host') or '').strip()
+    user = str(config.get('unifi_talk_user') or '').strip()
+    password = str(config.get('unifi_talk_pass') or '').strip()
+    list_name = str(config.get('unifi_talk_contact_list') or 'iCloud').strip()
+    verify_ssl = bool(config.get('unifi_talk_verify_ssl', False))
+
+    if not host or not user or not password:
+        print("UniFi Talk Sync ist aktiviert, aber Host, Benutzername oder Passwort fehlen.")
+        return
+
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    if host.startswith('http://') or host.startswith('https://'):
+        base_url = host.rstrip('/')
+    else:
+        base_url = f"https://{host.rstrip('/')}"
+
+    print(f"Verbinde mit UniFi Console unter {base_url}...")
+    session = requests.Session()
+
+    # 1. Login an UniFi OS
+    login_url = f"{base_url}/api/auth/login"
+    login_payload = {
+        'username': user,
+        'password': password,
+        'remember': True
+    }
+    try:
+        resp = session.post(login_url, json=login_payload, verify=verify_ssl, timeout=15)
+    except Exception as e:
+        print(f"Fehler beim Verbindungsaufbau zu UniFi ({base_url}): {e}")
+        return
+
+    if resp.status_code != 200:
+        print(f"UniFi OS Login fehlgeschlagen: {resp.status_code} {resp.text}")
+        return
+
+    csrf_token = resp.headers.get('X-Csrf-Token') or resp.headers.get('x-csrf-token') or resp.cookies.get('csrf_token') or resp.cookies.get('TOKEN')
+    headers = {'X-Csrf-Token': csrf_token} if csrf_token else {}
+    print("Erfolgreich an UniFi OS angemeldet.")
+
+    # 2. Kontaktliste finden oder erstellen
+    try:
+        resp = session.get(f"{base_url}/proxy/talk/api/contact_list", verify=verify_ssl, timeout=15, headers=headers)
+        if resp.status_code != 200:
+            print(f"Fehler beim Abrufen der UniFi Talk Kontaktlisten: {resp.status_code} {resp.text}")
+            return
+        contact_lists = resp.json() or []
+    except Exception as e:
+        print(f"Fehler beim Abfragen von UniFi Talk Kontaktlisten: {e}")
+        return
+
+    target_list = None
+    for cl in contact_lists:
+        if cl.get('name') == list_name:
+            target_list = cl
+            break
+
+    if not target_list:
+        print(f"Erstelle neue UniFi Talk Kontaktliste '{list_name}'...")
+        create_resp = session.post(
+            f"{base_url}/proxy/talk/api/contact_list",
+            json={'name': list_name, 'contacts': []},
+            headers=headers,
+            verify=verify_ssl,
+            timeout=15
+        )
+        if create_resp.status_code not in (200, 201):
+            print(f"Fehler beim Erstellen der Kontaktliste '{list_name}': {create_resp.status_code} {create_resp.text}")
+            return
+        resp = session.get(f"{base_url}/proxy/talk/api/contact_list", verify=verify_ssl, timeout=15, headers=headers)
+        contact_lists = resp.json() or []
+        for cl in contact_lists:
+            if cl.get('name') == list_name:
+                target_list = cl
+                break
+
+    if not target_list or 'id' not in target_list:
+        print(f"Konnte ID der UniFi Talk Kontaktliste '{list_name}' nicht ermitteln.")
+        return
+
+    contact_list_id = target_list['id']
+    print(f"Verwende UniFi Talk Kontaktliste '{list_name}' (ID: {contact_list_id}).")
+
+    # 3. Alte Kontakte aus dieser Kontaktliste bereinigen
+    try:
+        resp = session.get(f"{base_url}/proxy/talk/api/contacts", verify=verify_ssl, timeout=30, headers=headers)
+        if resp.status_code == 200:
+            existing_contacts = resp.json() or []
+            ids_to_delete = []
+            for ec in existing_contacts:
+                c_lists = ec.get('contactLists', [])
+                in_this_list = False
+                for item in c_lists:
+                    if (isinstance(item, dict) and item.get('id') == contact_list_id) or (item == contact_list_id):
+                        in_this_list = True
+                        break
+                if in_this_list and 'uuid' in ec:
+                    ids_to_delete.append(ec['uuid'])
+
+            if ids_to_delete:
+                print(f"Lösche {len(ids_to_delete)} bestehende Kontakte aus Liste '{list_name}'...")
+                for i in range(0, len(ids_to_delete), 50):
+                    chunk = ids_to_delete[i:i + 50]
+                    session.post(
+                        f"{base_url}/proxy/talk/api/contact/delete",
+                        json={'ids': chunk},
+                        headers=headers,
+                        verify=verify_ssl,
+                        timeout=30
+                    )
+    except Exception as e:
+        print(f"Hinweis beim Bereinigen alter UniFi Talk Kontakte: {e}")
+
+    # 4. Kontakte für UniFi Talk formatieren
+    unifi_contacts_payload = []
+    for c in merged_contacts:
+        numbers = []
+        seen_dids = set()
+
+        for m in list(dict.fromkeys(c.canonical_mobile)):
+            if m not in seen_dids:
+                numbers.append({'did': m, 'label': 'mobile'})
+                seen_dids.add(m)
+        for h in list(dict.fromkeys(c.canonical_home)):
+            if h not in seen_dids:
+                numbers.append({'did': h, 'label': 'home'})
+                seen_dids.add(h)
+        for w in list(dict.fromkeys(c.canonical_work)):
+            if w not in seen_dids:
+                numbers.append({'did': w, 'label': 'work'})
+                seen_dids.add(w)
+        for o in list(dict.fromkeys(c.canonical_other)):
+            if o not in seen_dids:
+                numbers.append({'did': o, 'label': 'other'})
+                seen_dids.add(o)
+
+        if not numbers and c.canonical_numbers:
+            for num in list(dict.fromkeys(sorted(list(c.canonical_numbers)))):
+                if num not in seen_dids:
+                    numbers.append({'did': num, 'label': 'other'})
+                    seen_dids.add(num)
+
+        if not numbers:
+            continue
+
+        first_n = c.given_name.strip() if c.given_name else c.fn.strip()
+        last_n = c.family_name.strip() if c.given_name else ''
+
+        entry = {
+            'first_name': first_n,
+            'last_name': last_n,
+            'numbers': numbers,
+            'contactLists': [contact_list_id],
+            'invalid_field': False
+        }
+        if getattr(c, 'email', None):
+            entry['email'] = c.email
+
+        unifi_contacts_payload.append(entry)
+
+    # 5. Kontakte in Batches nach UniFi Talk pushen
+    print(f"Übertrage {len(unifi_contacts_payload)} Kontakte nach UniFi Talk in Liste '{list_name}'...")
+    success_count = 0
+    for i in range(0, len(unifi_contacts_payload), 50):
+        chunk = unifi_contacts_payload[i:i + 50]
+        payload = {
+            'contactListId': contact_list_id,
+            'contacts': chunk
+        }
+        save_resp = session.post(
+            f"{base_url}/proxy/talk/api/contacts",
+            json=payload,
+            headers=headers,
+            verify=verify_ssl,
+            timeout=30
+        )
+        if save_resp.status_code in (200, 201):
+            success_count += len(chunk)
+        else:
+            print(f"Fehler beim Speichern eines Batches in UniFi Talk: {save_resp.status_code} {save_resp.text[:200]}")
+
+    print(f"UniFi Talk Sync abgeschlossen: {success_count} von {len(unifi_contacts_payload)} Kontakten in Liste '{list_name}' synchronisiert.")
+
+def export_unifi_csv(merged_contacts):
+    """
+    Schreibt ein aktuelles UniFi Talk CSV-Backup nach /share und /config.
+    """
+    target_dirs = []
+    if os.path.isdir('/share'):
+        target_dirs.append('/share')
+    if os.path.isdir('/config'):
+        target_dirs.append('/config')
+
+    if not target_dirs:
+        return
+
+    header = ['first_name', 'last_name', 'company', 'job_title', 'email', 'mobile_number', 'home_number', 'work_number', 'fax_number', 'other_number']
+
+    for d in target_dirs:
+        csv_file = os.path.join(d, 'unifi_talk_contacts.csv')
+        try:
+            with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                for c in merged_contacts:
+                    first_n = c.given_name.strip() if c.given_name else c.fn.strip()
+                    last_n = c.family_name.strip() if c.given_name else ''
+                    mob = c.canonical_mobile[0] if c.canonical_mobile else ''
+                    hom = c.canonical_home[0] if c.canonical_home else ''
+                    wrk = c.canonical_work[0] if c.canonical_work else ''
+                    oth = c.canonical_other[0] if c.canonical_other else ''
+                    if not (mob or hom or wrk or oth) and c.canonical_numbers:
+                        mob = list(c.canonical_numbers)[0]
+
+                    writer.writerow([
+                        first_n,
+                        last_n,
+                        '',
+                        '',
+                        getattr(c, 'email', ''),
+                        mob,
+                        hom,
+                        wrk,
+                        '',
+                        oth
+                    ])
+            print(f"UniFi Talk CSV-Datei erfolgreich aktualisiert: {csv_file}")
+        except Exception as e:
+            print(f"Hinweis beim Schreiben von {csv_file}: {e}")
 
 def sync_contacts():
     config = get_ha_config()
@@ -426,13 +669,19 @@ def sync_contacts():
                 target_contact.mobile_numbers.extend(extracted['mobile'])
                 target_contact.fax_numbers.extend(extracted['fax'])
                 target_contact.other_numbers.extend(extracted['other'])
+                target_contact.canonical_mobile.extend(extracted['canonical_mobile_list'])
+                target_contact.canonical_home.extend(extracted['canonical_home_list'])
+                target_contact.canonical_work.extend(extracted['canonical_work_list'])
+                target_contact.canonical_other.extend(extracted['canonical_other_list'])
+                if not getattr(target_contact, 'email', None) and extracted.get('email'):
+                    target_contact.email = extracted['email']
 
                 if name_quality(fn, family_name, given_name) > name_quality(target_contact.fn, target_contact.family_name, target_contact.given_name):
                     target_contact.fn = fn
                     target_contact.family_name = family_name
                     target_contact.given_name = given_name
             else:
-                new_contact = MergedContact(fn, family_name, given_name, acc_idx)
+                new_contact = MergedContact(fn, family_name, given_name, acc_idx, email=extracted.get('email', ''))
                 new_contact.canonical_numbers = temp_canonical
                 new_contact.canonical_mobile_numbers = extracted['canonical_mobile']
                 new_contact.home_numbers = extracted['home']
@@ -440,10 +689,15 @@ def sync_contacts():
                 new_contact.mobile_numbers = extracted['mobile']
                 new_contact.fax_numbers = extracted['fax']
                 new_contact.other_numbers = extracted['other']
+                new_contact.canonical_mobile = extracted['canonical_mobile_list']
+                new_contact.canonical_home = extracted['canonical_home_list']
+                new_contact.canonical_work = extracted['canonical_work_list']
+                new_contact.canonical_other = extracted['canonical_other_list']
                 merged_contacts.append(new_contact)
 
     print(f"Kontakte aus allen Accounts geladen ({total_raw_contacts} Rohkontakte). Insgesamt {len(merged_contacts)} Telefonbuch-Kontakte nach Deduplizierung.")
 
+    # 1. OpenLDAP Synchronisation (fuer Gigaset / VoIP)
     ldap_user = str(config.get('ldap_user') or '').strip()
     ldap_pass = str(config.get('ldap_pass') or '').strip()
 
@@ -458,12 +712,12 @@ def sync_contacts():
     server = Server('ldap://localhost:389', get_info=ALL)
     conn = Connection(server, bind_dn, bind_pw, auto_bind=True)
 
-    # 1. Basis Domain dc=home,dc=local anlegen
+    # Basis Domain dc=home,dc=local anlegen
     conn.add('dc=home,dc=local', ['top', 'dcObject', 'organization'], {'dc': 'home', 'o': 'Home'})
     if conn.result.get('description') not in ('success', 'entryAlreadyExists'):
         print(f"Initialisierung dc=home,dc=local: {conn.result}")
 
-    # 2. OU ou=contacts,dc=home,dc=local anlegen
+    # OU ou=contacts,dc=home,dc=local anlegen
     conn.add('ou=contacts,dc=home,dc=local', ['top', 'organizationalUnit'], {'ou': 'contacts'})
     if conn.result.get('description') not in ('success', 'entryAlreadyExists'):
         print(f"Initialisierung ou=contacts,dc=home,dc=local: {conn.result}")
@@ -479,7 +733,6 @@ def sync_contacts():
         used_cns[cn] = count + 1
         unique_cn = cn if count == 0 else f"{cn} ({count + 1})"
 
-        # Eindeutige Listen unter Beruecksichtigung von OpenLDAP's telephoneNumberMatch
         work_list = deduplicate_ldap_telephones(c.work_numbers)
         home_list = deduplicate_ldap_telephones(c.home_numbers)
         mobile_list = deduplicate_ldap_telephones(c.mobile_numbers)
@@ -543,7 +796,19 @@ def sync_contacts():
                 print(f"Loesche entfernten Kontakt aus LDAP: {entry_dn}")
                 conn.delete(entry_dn)
     except Exception as e:
-        print(f"Hinweis beim Bereinigen alter Kontakte: {e}")
+        print(f"Hinweis beim Bereinigen alter Kontakte in LDAP: {e}")
+
+    # 2. UniFi Talk Synchronisation (optional)
+    try:
+        sync_unifi_talk(merged_contacts, config)
+    except Exception as e:
+        print(f"Fehler bei UniFi Talk Synchronisation: {e}")
+
+    # 3. CSV Export (in /share und /config fuer manuelle Uploads oder Backups)
+    try:
+        export_unifi_csv(merged_contacts)
+    except Exception as e:
+        print(f"Hinweis beim Schreiben der UniFi CSV: {e}")
 
     print("Sync erfolgreich abgeschlossen.")
 
